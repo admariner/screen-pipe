@@ -8,13 +8,14 @@ use sqlx::{
 };
 use std::time::Duration;
 use tokio::time::{timeout, Duration as TokioDuration};
-use crate::chunking::text_chunking_local;
+use crate::chunking::{text_chunking_by_similarity, text_chunking_simple};
 use screenpipe_vision::OcrEngine;
 use std::sync::Arc;
 use screenpipe_integrations::friend_wearable::FriendWearableDatabase;
 use async_trait::async_trait;
 use std::error::Error as StdError;
 use std::fmt;
+use screenpipe_integrations::unstructured_ocr::unstructured_chunking;
 
 #[derive(Debug)]
 pub struct DatabaseError(String);
@@ -38,8 +39,6 @@ pub struct OCRResult {
     pub frame_id: i64,
     pub ocr_text: String,
     pub text_json: String,                       // Store as JSON string
-    pub new_text_json_vs_previous_frame: String, // Store as JSON string
-    pub raw_data_output_from_ocr: String,        // Store as JSON string
     pub timestamp: DateTime<Utc>,
     pub file_path: String,
     pub offset_index: i64,
@@ -144,38 +143,46 @@ impl DatabaseManager {
         tx.commit().await?;
 
         // Now, let's chunk the transcription and insert into chunk tables
-        // const CHUNKING_ENGINE: &str = "candle-jina-bert";
-        // match text_chunking_local(transcription).await {
-        //     Ok(chunks) => {
-        //         info!("Successfully chunked audio transcription into {} chunks", chunks.len());
-        //         for chunk in chunks.iter() {
-        //             if let Err(e) = self.insert_chunked_text(
-        //                 audio_chunk_id,
-        //                 chunk,
-        //                 Utc::now(),
-        //                 transcription_engine,
-        //                 CHUNKING_ENGINE,
-        //                 ContentSource::Audio,
-        //             ).await {
-        //                 error!("Failed to insert chunk into chunked text index: {}", e);
-        //             }
-        //         }
-        //     }
-        //     Err(e) => {
-        //         error!("Failed to chunk audio transcription: {}", e);
-        //         // Fallback to inserting the whole transcription as a single chunk
-        //         if let Err(e) = self.insert_chunked_text(
-        //             audio_chunk_id,
-        //             transcription,
-        //             Utc::now(),
-        //             transcription_engine,
-        //             "No_Chunking",
-        //             ContentSource::Audio,
-        //         ).await {
-        //             error!("Failed to insert whole audio transcription into chunked text index: {}", e);
-        //         }
-        //     }
-        // }
+        const CHUNKING_ENGINE: &str = "local_simple";
+
+        let chunks = match CHUNKING_ENGINE {
+            "local_simple" => text_chunking_simple(transcription),
+            "candle_jina_bert" => text_chunking_by_similarity(transcription).await,
+            "unstructured" => unstructured_chunking(transcription).map_err(|e| anyhow::anyhow!(e)).and_then(|chunks| Ok(chunks)),
+            _ => text_chunking_simple(transcription), // Default to simple chunking for unknown engines
+        };
+
+        match chunks {
+            Ok(chunks) => {
+                info!("Successfully chunked audio transcription into {} chunks", chunks.len());
+                for chunk in chunks.iter() {
+                    if let Err(e) = self.insert_chunked_text(
+                        audio_chunk_id,
+                        chunk,
+                        Utc::now(),
+                        transcription_engine,
+                        CHUNKING_ENGINE,
+                        ContentSource::Audio,
+                    ).await {
+                        error!("Failed to insert chunk into chunked text index: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to chunk audio transcription: {}", e);
+                // Fallback to inserting the whole transcription as a single chunk
+                if let Err(e) = self.insert_chunked_text(
+                    audio_chunk_id,
+                    transcription,
+                    Utc::now(),
+                    transcription_engine,
+                    "No_Chunking",
+                    ContentSource::Audio,
+                ).await {
+                    error!("Failed to insert whole audio transcription into chunked text index: {}", e);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -248,26 +255,22 @@ impl DatabaseManager {
         frame_id: i64,
         text: &str,
         text_json: &str,
-        new_text_json_vs_previous_frame: &str,
-        raw_data_output_from_ocr: &str,
         app_name: &str,
         ocr_engine: Arc<OcrEngine>,
     ) -> Result<(), sqlx::Error> {
         const MAX_RETRIES: u32 = 3;
         const TIMEOUT_DURATION: TokioDuration = TokioDuration::from_secs(10);
 
-        debug!("Starting insert_ocr_text for frame_id: {}", frame_id);
+        // debug!("Starting insert_ocr_text for frame_id: {}", frame_id);
 
         for attempt in 1..=MAX_RETRIES {
-            debug!("Attempt {} to insert OCR text", attempt);
+            // debug!("Attempt {} to insert OCR text", attempt);
             match timeout(
                 TIMEOUT_DURATION,
                 self.insert_ocr_text_old(
                     frame_id,
                     text,
                     text_json,
-                    new_text_json_vs_previous_frame,
-                    raw_data_output_from_ocr,
                     app_name,
                     Arc::clone(&ocr_engine),
                 ),
@@ -276,44 +279,52 @@ impl DatabaseManager {
             {
                 Ok(Ok(())) => {
                     // debug!("Successfully inserted OCR text, proceeding to chunking");
-                    // // Chunk the text before inserting into chunked text index
-                    // const CHUNKING_ENGINE: &str = "candle-jina-bert";
-                    // match text_chunking_local(text).await {
-                    //     Ok(chunks) => {
-                    //         info!("Successfully chunked text into {} chunks", chunks.len());
-                    //         for chunk in chunks.iter() {
-                    //             if let Err(e) = self.insert_chunked_text(
-                    //                 frame_id,
-                    //                 chunk,
-                    //                 Utc::now(),
-                    //                 &format!("{:?}", *ocr_engine),
-                    //                 CHUNKING_ENGINE,
-                    //                 ContentSource::Screen,
-                    //             ).await {
-                    //                 error!("Failed to insert chunk into chunked text index: {}", e);
-                    //             }
-                    //         }
-                    //     }
-                    //     Err(e) => {
-                    //         error!("Failed to chunk text: {}", e);
-                    //         // Fallback to inserting the whole text if chunking fails
-                    //         debug!("Inserting whole text as a single chunk");
-                    //         if let Err(e) = self.insert_chunked_text(
-                    //             frame_id,
-                    //             text,
-                    //             Utc::now(),
-                    //             &format!("{:?}", *ocr_engine),
-                    //             "No_Chunking",
-                    //             ContentSource::Screen,
-                    //         ).await {
-                    //             error!("Failed to insert whole text into chunked text index: {}", e);
-                    //         }
-                    //     }
-                    // }
-                    // info!(
-                    //     "Successfully completed OCR text insertion for frame_id: {} on attempt {}",
-                    //     frame_id, attempt
-                    // );
+                    // Chunk the text before inserting into chunked text index
+                    const CHUNKING_ENGINE: &str = "local_simple";
+
+                    let chunks = match CHUNKING_ENGINE {
+                        "local_simple" => text_chunking_simple(text),
+                        "candle_jina_bert" => text_chunking_by_similarity(text).await,
+                        "unstructured" => unstructured_chunking(text).map_err(|e| anyhow::anyhow!(e)).and_then(|chunks| Ok(chunks)),
+                        _ => text_chunking_simple(text), // Default to simple chunking for unknown engines
+                    };
+
+                    match chunks {
+                        Ok(chunks) => {
+                            debug!("Successfully chunked text into {} chunks", chunks.len());
+                            for chunk in chunks.iter() {
+                                if let Err(e) = self.insert_chunked_text(
+                                    frame_id,
+                                    chunk,
+                                    Utc::now(),
+                                    &format!("{:?}", *ocr_engine),
+                                    CHUNKING_ENGINE,
+                                    ContentSource::Screen,
+                                ).await {
+                                    error!("Failed to insert chunk into chunked text index: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to chunk text: {}", e);
+                            // Fallback to inserting the whole text if chunking fails
+                            debug!("Inserting whole text as a single chunk");
+                            if let Err(e) = self.insert_chunked_text(
+                                frame_id,
+                                text,
+                                Utc::now(),
+                                &format!("{:?}", *ocr_engine),
+                                "No_Chunking",
+                                ContentSource::Screen,
+                            ).await {
+                                error!("Failed to insert whole text into chunked text index: {}", e);
+                            }
+                        }
+                    }
+                    info!(
+                        "Successfully completed OCR text insertion for frame_id: {} on attempt {}",
+                        frame_id, attempt
+                    );
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -352,32 +363,24 @@ impl DatabaseManager {
         frame_id: i64,
         text: &str,
         text_json: &str,
-        new_text_json_vs_previous_frame: &str,
-        raw_data_output_from_ocr: &str,
         app_name: &str,
         ocr_engine: Arc<OcrEngine>,
     ) -> Result<(), sqlx::Error> {
         // debug!("Starting insert_ocr_text_old for frame_id: {}", frame_id);
 
         // Log the input parameters with limited length
-        info!(
+        debug!(
             "Inserting OCR text with frame_id: {}, text: {}{}",
             frame_id,
-            text.chars().take(100).collect::<String>(),
-            if text.chars().count() > 100 {
-                "..."
-            } else {
-                ""
-            }
+            text.replace('\n', " ").chars().take(100).collect::<String>(),
+            if text.len() > 100 { "..." } else { "" }
         );
 
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO ocr_text (frame_id, text, text_json, new_text_json_vs_previous_frame, raw_data_output_from_OCR, app_name, ocr_engine) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")
+        sqlx::query("INSERT INTO ocr_text (frame_id, text, text_json, app_name, ocr_engine) VALUES (?1, ?2, ?3, ?4, ?5)")
             .bind(frame_id)
             .bind(text)
             .bind(text_json)
-            .bind(new_text_json_vs_previous_frame)
-            .bind(raw_data_output_from_ocr)
             .bind(app_name)
             .bind(format!("{:?}", *ocr_engine))
             .execute(&mut *tx)
@@ -457,8 +460,6 @@ impl DatabaseManager {
                 ocr_text.frame_id,
                 ocr_text.text as ocr_text,
                 ocr_text.text_json,
-                ocr_text.new_text_json_vs_previous_frame,
-                ocr_text.raw_data_output_from_OCR,
                 frames.timestamp,
                 video_chunks.file_path,
                 frames.offset_index,
