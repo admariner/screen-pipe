@@ -1,74 +1,65 @@
 import CoreGraphics
+import CoreImage
 import Foundation
 import Vision
-import CoreImage
+
+// TODO: how can we use Metal to speed this up?
 
 @available(macOS 10.15, *)
 @_cdecl("perform_ocr")
 public func performOCR(imageData: UnsafePointer<UInt8>, length: Int, width: Int, height: Int)
   -> UnsafeMutablePointer<CChar>? {
+  return autoreleasepool {
 
-  guard let dataProvider = CGDataProvider(data: Data(bytes: imageData, count: length) as CFData),
-        let cgImage = CGImage(
-          width: width,
-          height: height,
-          bitsPerComponent: 8,
-          bitsPerPixel: 32,
-          bytesPerRow: width * 4,
-          space: CGColorSpaceCreateDeviceRGB(),
-          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-          provider: dataProvider,
-          decode: nil,
-          shouldInterpolate: false,
-          intent: .defaultIntent
-        )
-  else {
-    return strdup("Error: Failed to create CGImage")
-  }
-
-  // Preprocess the image
-  let ciImage = CIImage(cgImage: cgImage)
-  let context = CIContext(options: nil)
-  
-  // Apply preprocessing filters
-  let processed = ciImage
-    .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0, kCIInputContrastKey: 1.1])
-    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1])
-    .applyingFilter("CIColorControls", parameters: [kCIInputBrightnessKey: 0.1])
-  
-  guard let preprocessedCGImage = context.createCGImage(processed, from: processed.extent) else {
-    return strdup("Error: Failed to create preprocessed image")
-  }
-
-  let semaphore = DispatchSemaphore(value: 0)
-  var ocrResult = ""
-  var textElements: [[String: Any]] = []
-  var totalConfidence: Float = 0.0
-  var observationCount: Int = 0
-
-  // Slice the image horizontally with overlap
-  let sliceCount = 5 // Adjust this number based on your needs
-  let sliceHeight = height / sliceCount
-  let overlap = Int(Float(sliceHeight) * 0.1) // 10% overlap
-
-  for i in 0..<sliceCount {
-    let sliceY = max(0, i * sliceHeight - overlap)
-    let sliceHeight = min(height - sliceY, sliceHeight + overlap)
-    let sliceRect = CGRect(x: 0, y: sliceY, width: width, height: sliceHeight)
-    guard let sliceCGImage = preprocessedCGImage.cropping(to: sliceRect) else {
-      continue
+    guard let dataProvider = CGDataProvider(data: Data(bytes: imageData, count: length) as CFData),
+      let cgImage = CGImage(
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: dataProvider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+      )
+    else {
+      return strdup("Error: Failed to create CGImage")
     }
+
+    // Preprocess the image
+    let ciImage = CIImage(cgImage: cgImage)
+    let context = CIContext(options: nil)
+
+    // Apply preprocessing filters (slightly reduced contrast compared to original)
+    // let processed =
+    //   ciImage
+    //   .applyingFilter(
+        // "CIColorControls", parameters: [kCIInputContrastKey: 1.2]
+    //   )
+    //   .applyingFilter(
+    //     "CIUnsharpMask", parameters: [kCIInputRadiusKey: 0.5, kCIInputIntensityKey: 0.7])
+    let processed = ciImage
+  
+    guard let preprocessedCGImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+      return strdup("Error: Failed to create preprocessed image")
+    }
+
+    var ocrResult = ""
+    var textElements: [[String: Any]] = []
+    var totalConfidence: Float = 0.0
+    var observationCount: Int = 0
 
     let textRequest = VNRecognizeTextRequest { request, error in
       if let error = error {
-        ocrResult = "Error: \(error.localizedDescription)"
-        semaphore.signal()
+        print("Error: \(error.localizedDescription)")
         return
       }
 
       guard let observations = request.results as? [VNRecognizedTextObservation] else {
-        ocrResult = "Error: Failed to process image or no text found"
-        semaphore.signal()
+        print("Error: Failed to process image or no text found")
         return
       }
 
@@ -78,15 +69,20 @@ public func performOCR(imageData: UnsafePointer<UInt8>, length: Int, width: Int,
         }
         let text = topCandidate.string
         let confidence = topCandidate.confidence
+
+        // Reduced threshold for including results
+        if confidence < 0.2 {
+          continue  // Skip very low-confidence results
+        }
         let boundingBox = observation.boundingBox
         textElements.append([
           "text": text,
           "confidence": confidence,
           "boundingBox": [
             "x": boundingBox.origin.x,
-            "y": (CGFloat(sliceY) + boundingBox.origin.y * CGFloat(sliceHeight)) / CGFloat(height),
+            "y": boundingBox.origin.y,
             "width": boundingBox.size.width,
-            "height": boundingBox.size.height * CGFloat(sliceHeight) / CGFloat(height)
+            "height": boundingBox.size.height
           ]
         ])
 
@@ -94,41 +90,62 @@ public func performOCR(imageData: UnsafePointer<UInt8>, length: Int, width: Int,
         totalConfidence += confidence
         observationCount += 1
       }
-      semaphore.signal()
     }
 
+    textRequest.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
     textRequest.recognitionLevel = .accurate
+    textRequest.usesLanguageCorrection = true
 
-    let handler = VNImageRequestHandler(cgImage: sliceCGImage, options: [:])
+    let handler = VNImageRequestHandler(cgImage: preprocessedCGImage, options: [:])
     do {
       try handler.perform([textRequest])
     } catch {
-      return strdup("Error: Failed to perform OCR - \(error.localizedDescription)")
+      print("Error: Failed to perform OCR - \(error.localizedDescription)")
     }
 
-    semaphore.wait()
-  }
+    let overallConfidence = observationCount > 0 ? totalConfidence / Float(observationCount) : 0.0
+    // print("Overall confidence: \(overallConfidence)")
+    let result: [String: Any] = [
+      "ocrResult": ocrResult.isEmpty ? NSNull() : ocrResult,
+      "textElements": textElements,
+      "overallConfidence": overallConfidence
+    ]
 
-  let overallConfidence = observationCount > 0 ? totalConfidence / Float(observationCount) : 0.0
-  let result: [String: Any] = [
-    "ocrResult": ocrResult.isEmpty ? "No text found" : ocrResult,
-    "textElements": textElements,
-    "overallConfidence": overallConfidence
-  ]
-
-  if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: []),
-     let jsonString = String(data: jsonData, encoding: .utf8) {
-    return strdup(jsonString)
-  } else {
-    return strdup("Error: Failed to serialize result to JSON")
+    if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: []),
+      let jsonString = String(data: jsonData, encoding: .utf8) {
+      let cString = jsonString.cString(using: .utf8)
+      let buffer = UnsafeMutablePointer<Int8>.allocate(capacity: cString!.count)
+      buffer.initialize(from: cString!, count: cString!.count)
+      return buffer
+    } else {
+      let errorString = "Error: Failed to serialize result to JSON"
+      let cString = errorString.cString(using: .utf8)!
+      let buffer = UnsafeMutablePointer<Int8>.allocate(capacity: cString.count)
+      buffer.initialize(from: cString, count: cString.count)
+      return buffer
+    }
   }
 }
 
-// # Compile for x86_64
-// swiftc -emit-library -target x86_64-apple-macosx10.15 -o screenpipe-vision/lib/libscreenpipe_x86_64.dylib screenpipe-vision/src/ocr.swift
+@_cdecl("free_string")
+public func freeString(_ ptr: UnsafeMutablePointer<Int8>?) {
+  if let ptr = ptr {
+    ptr.deallocate()
+  }
+}
 
-// # Compile for arm64 (aarch64)
-// swiftc -emit-library -target arm64-apple-macosx11.0 -o screenpipe-vision/lib/libscreenpipe_arm64.dylib screenpipe-vision/src/ocr.swift
+/*
+Compile for multi arch:
 
-// # Combine into a universal binary
-// lipo -create screenpipe-vision/lib/libscreenpipe_x86_64.dylib screenpipe-vision/lib/libscreenpipe_arm64.dylib -output screenpipe-vision/lib/libscreenpipe.dylib
+swiftc -emit-library -target x86_64-apple-macosx11.0 -o screenpipe-vision/lib/libscreenpipe_x86_64.dylib screenpipe-vision/src/ocr.swift -framework Metal -framework MetalPerformanceShaders -framework Vision -framework CoreImage \
+&& swiftc -emit-library -target arm64-apple-macosx11.0 -o screenpipe-vision/lib/libscreenpipe_arm64.dylib screenpipe-vision/src/ocr.swift -framework Metal -framework MetalPerformanceShaders -framework Vision -framework CoreImage \
+&& lipo -create screenpipe-vision/lib/libscreenpipe_x86_64.dylib screenpipe-vision/lib/libscreenpipe_arm64.dylib -output screenpipe-vision/lib/libscreenpipe.dylib
+
+atm dirty hack: cp screenpipe-vision/lib* /usr/local/lib
+
+How to optimise this code:
+
+1. run cargo bench --bench ocr_benchmark
+2. change the code & compile again
+3. run cargo bench --bench ocr_benchmark again to see if it's faster or more accurate
+*/

@@ -2,19 +2,16 @@ use crate::capture_screenshot_by_window::capture_all_visible_windows;
 use crate::core::MaxAverageFrame;
 use image::DynamicImage;
 use image_compare::{Algorithm, Metric, Similarity};
-use log::{debug, error};
-use rusty_tesseract::{Args, DataOutput, Image};
-use serde_json;
+use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xcap::Monitor;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub enum OcrEngine {
     Unstructured,
     Tesseract,
@@ -52,95 +49,10 @@ pub fn compare_images_ssim(image1: &DynamicImage, image2: &DynamicImage) -> f64 
     result.score
 }
 
-pub fn perform_ocr_tesseract(image: &DynamicImage) -> (String, String) {
-    let args = Args {
-        lang: "eng".to_string(),
-        config_variables: HashMap::from([("tessedit_create_tsv".into(), "1".into())]),
-        dpi: Some(600), // 150 is a balanced option, 600 seems faster surprisingly, the bigger the number the more granualar result
-        psm: Some(1), // PSM 1: Automatic page segmentation with OSD. PSM 3: Automatic page segmentation with OSD
-        oem: Some(1), //1: Neural nets LSTM engine only,    3: Default, based on what is available. (Default)
-    };
-
-    let ocr_image = Image::from_dynamic_image(image).unwrap();
-
-    // Extract data output
-    let data_output = rusty_tesseract::image_to_data(&ocr_image, &args).unwrap();
-    // let tsv_output = data_output_to_tsv(&data_output);
-
-    // Extract text from data output
-    let text = data_output_to_text(&data_output);
-    let json_output = data_output_to_json(&data_output);
-
-    (text, json_output)
-}
-
-fn data_output_to_text(data_output: &DataOutput) -> String {
-    let mut text = String::new();
-    for record in &data_output.data {
-        if !record.text.is_empty() {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(&record.text);
-        }
-    }
-    text
-}
-
-fn data_output_to_json(data_output: &DataOutput) -> String {
-    let mut lines: Vec<HashMap<String, String>> = Vec::new();
-    let mut current_line = String::new();
-    let mut current_conf = 0.0;
-    let mut word_count = 0;
-    let mut last_word_num = 0;
-
-    for record in &data_output.data {
-        if record.word_num == 0 {
-            if !current_line.is_empty() {
-                let avg_conf = current_conf / word_count as f32;
-                let mut line_data = HashMap::new();
-                line_data.insert("text".to_string(), current_line.clone());
-                line_data.insert("confidence".to_string(), format!("{:.2}", avg_conf));
-                line_data.insert(
-                    "line_position".to_string(),
-                    format!(
-                        "level{}page_num{}block_num{}par_num{}line_num{}",
-                        record.level,
-                        record.page_num,
-                        record.block_num,
-                        record.par_num,
-                        record.line_num
-                    ),
-                );
-                lines.push(line_data);
-                current_line.clear();
-                current_conf = 0.0;
-                word_count = 0;
-            }
-        }
-        if record.word_num > last_word_num {
-            if !current_line.is_empty() {
-                current_line.push(' ');
-            }
-            current_line.push_str(&record.text);
-            current_conf += record.conf;
-            word_count += 1;
-        }
-        last_word_num = record.word_num;
-    }
-    if !current_line.is_empty() {
-        let avg_conf = current_conf / word_count as f32;
-        let mut line_data = HashMap::new();
-        line_data.insert("text".to_string(), current_line);
-        line_data.insert("confidence".to_string(), format!("{:.2}", avg_conf));
-        lines.push(line_data);
-    }
-
-    serde_json::to_string_pretty(&lines).unwrap()
-}
-
 pub async fn capture_screenshot(
-    monitor: Arc<Monitor>,
+    monitor: &Monitor,
+    ignore_list: &[String],
+    include_list: &[String],
 ) -> Result<
     (
         DynamicImage,
@@ -150,22 +62,33 @@ pub async fn capture_screenshot(
     ),
     anyhow::Error,
 > {
+    // info!("Starting screenshot capture for monitor: {:?}", monitor);
     let capture_start = Instant::now();
-    let buffer = monitor.capture_image().unwrap();
+    let buffer = monitor.capture_image().map_err(|e| {
+        error!("Failed to capture monitor image: {}", e);
+        anyhow::anyhow!("Monitor capture failed")
+    })?;
     let image = DynamicImage::ImageRgba8(buffer);
     let image_hash = calculate_hash(&image);
     let capture_duration = capture_start.elapsed();
 
-    // Capture all visible windows
-    let window_images = capture_all_visible_windows(monitor.clone())
-        .await
-        .unwrap_or_default();
+    let window_images = match capture_all_visible_windows(monitor, ignore_list, include_list).await
+    {
+        Ok(images) => images,
+        Err(e) => {
+            warn!(
+                "Failed to capture window images: {}. Continuing with empty result.",
+                e
+            );
+            Vec::new()
+        }
+    };
 
     Ok((image, window_images, image_hash, capture_duration))
 }
 
 pub async fn compare_with_previous_image(
-    previous_image: &Option<Arc<DynamicImage>>,
+    previous_image: Option<&DynamicImage>,
     current_image: &DynamicImage,
     max_average: &mut Option<MaxAverageFrame>,
     frame_number: u64,
@@ -255,46 +178,4 @@ pub async fn save_text_files(
             }
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-pub async fn perform_ocr_windows(image: &DynamicImage) -> (String, String) {
-    use std::io::Cursor;
-    use windows::{
-        Graphics::Imaging::BitmapDecoder,
-        Media::Ocr::OcrEngine as WindowsOcrEngine,
-        Storage::Streams::{DataWriter, InMemoryRandomAccessStream},
-    };
-
-    let mut buffer = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png)
-        .unwrap();
-
-    let stream = InMemoryRandomAccessStream::new().unwrap();
-    let writer = DataWriter::CreateDataWriter(&stream).unwrap();
-    writer.WriteBytes(&buffer).unwrap();
-    writer.StoreAsync().unwrap().get().unwrap();
-    writer.FlushAsync().unwrap().get().unwrap();
-    stream.Seek(0).unwrap();
-
-    let decoder = BitmapDecoder::CreateWithIdAsync(BitmapDecoder::PngDecoderId().unwrap(), &stream)
-        .unwrap()
-        .get()
-        .unwrap();
-
-    let bitmap = decoder.GetSoftwareBitmapAsync().unwrap().get().unwrap();
-
-    let engine = WindowsOcrEngine::TryCreateFromUserProfileLanguages().unwrap();
-    let result = engine.RecognizeAsync(&bitmap).unwrap().get().unwrap();
-
-    let text = result.Text().unwrap().to_string();
-
-    let json_output = serde_json::json!([{
-        "text": text,
-        "confidence": "n/a" // Windows OCR doesn't provide confidence scores, so we use a default high value
-    }])
-    .to_string();
-
-    (text, json_output)
 }

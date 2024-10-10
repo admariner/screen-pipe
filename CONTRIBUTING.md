@@ -2,7 +2,7 @@
 
 First off, thank you for considering contributing to Screen Pipe! It's people like you that make Screen Pipe such a great tool.
 
-I'd love to personnally onboard you to the project. Let's [schedule a call](https://cal.com/louis030195/screenpipe).
+I'd love to personally onboard you to the project. Let's [schedule a call](https://cal.com/louis030195/screenpipe).
 
 ## Getting Started
 
@@ -53,6 +53,22 @@ We follow [this](https://doc.rust-lang.org/cargo/guide/project-layout.html) fold
 
 ## Additional Notes
 
+### AI system prompt
+
+I use cursor with this prompt to help me with the code:
+
+```
+Rules:
+- Coding: always use lower case for logging stuff or UI
+- Coding: Rust: always use anyhow error, tokio instead of std stuff, avoid mutex if you can, prefer channels, write code easy to read for humans, fast for machines
+- Coding: when i ask to give me the full code it means FULL, no fucking // rest of the code comments GIVE ME THE FULL CODE
+- Coding: if it seems like you lack some context about a niche lib just ask me to provide the source code and i will (instead of providing a bad answer)
+- Coding: NextJS: make sure to use tailwind, typescript, shadcn, lucide, magicui, and framer-motion to make UIs amazing
+- Coding: Make sure to escape html thing like quotes etc properly. Only when necessary
+- Coding: When writing react or html code make sure to use thing like &apos; instead of ". Only when necessary (e.g inside quote themselves)
+```
+
+
 ### Principles 
 
 - **User fanatic: focus on building what people want and making users happy.**
@@ -97,6 +113,43 @@ You can add env var to `.vscode/settings.json`:
 }
 ```
 
+This is @louis030195 whole `.vscode/settings.json` file:
+
+```json
+{
+    "rust-analyzer.server.extraEnv": {
+        "PKG_CONFIG_ALLOW_SYSTEM_LIBS": "1",
+        "PKG_CONFIG_ALLOW_SYSTEM_CFLAGS": "1",
+        "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig",
+        "PATH": "/usr/bin:/opt/homebrew/bin:${env:PATH}",
+        "DYLD_LIBRARY_PATH": "${workspaceFolder}/screenpipe-vision/lib:${env:DYLD_LIBRARY_PATH}"
+    },
+    "rust-analyzer.cargo.extraEnv": {
+        "PKG_CONFIG_ALLOW_SYSTEM_LIBS": "1",
+        "PKG_CONFIG_ALLOW_SYSTEM_CFLAGS": "1",
+        "PKG_CONFIG_PATH": "/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig",
+        "PATH": "/usr/bin:/opt/homebrew/bin:${env:PATH}",
+        "DYLD_LIBRARY_PATH": "${workspaceFolder}/screenpipe-vision/lib:${env:DYLD_LIBRARY_PATH}"
+    },
+    // add env to integrated terminal
+    "terminal.integrated.env.osx": {
+        "DYLD_LIBRARY_PATH": "${workspaceFolder}/screenpipe-vision/lib:${env:DYLD_LIBRARY_PATH}",
+        "SCREENPIPE_APP_DEV": "true",
+    },
+    "rust-analyzer.cargo.features": [
+        "pipes"
+    ],
+    "rust-analyzer.cargo.runBuildScripts": true,
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "--features",
+        "pipes"
+    ],
+    "rust-analyzer.cargo.allFeatures": false,
+    "rust-analyzer.cargo.noDefaultFeatures": false
+}
+```
+
 
 ## Other hacks
 
@@ -125,6 +178,8 @@ Then open the file in `target/release/instruments` using Xcode -> Open Developer
 cargo bench
 ```
 
+[Check benchmark visuals](https://mediar-ai.github.io/screenpipe/dev/bench/)
+
 ### Creating new migrations
 
 ```bash
@@ -132,7 +187,75 @@ cargo install sqlx-cli
 sqlx migrate add <migration_name>
 ```
 
+### Set up Azure Ubuntu VM with display & audio
 
+```bash
+# Set variables
+RG_NAME="my-avd-rgg"
+LOCATION="westus2" 
+VM_NAME="ubuntu-avd"
+IMAGE="Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest"
+VM_SIZE="Standard_D2s_v3"  
+
+# Create resource group
+az group create --name $RG_NAME --location $LOCATION
+
+# Create VM
+az vm create \
+  --resource-group $RG_NAME \
+  --name $VM_NAME \
+  --image $IMAGE \
+  --admin-username azureuser \
+  --generate-ssh-keys \
+  --size $VM_SIZE
+
+# Enable RDP
+az vm open-port --port 3389 --resource-group $RG_NAME --name $VM_NAME
+
+# Install xrdp, audio, and desktop environment
+az vm run-command invoke \
+  --resource-group $RG_NAME \
+  --name $VM_NAME \
+  --command-id RunShellScript \
+  --scripts "
+    sudo apt update && sudo apt install -y xrdp ubuntu-desktop pulseaudio
+    sudo systemctl enable xrdp
+    sudo adduser xrdp ssl-cert
+    echo 'startxfce4' | sudo tee /etc/xrdp/startwm.sh
+    sudo systemctl restart xrdp
+    sudo ufw allow 3389/tcp
+  "
+
+# Enable audio redirection
+az vm run-command invoke \
+  --resource-group $RG_NAME \
+  --name $VM_NAME \
+  --command-id RunShellScript \
+  --scripts "
+    echo 'load-module module-native-protocol-tcp auth-anonymous=1' | sudo tee -a /etc/pulse/default.pa
+    sudo systemctl restart pulseaudio
+  "
+
+# Get IP address
+IP=$(az vm list-ip-addresses --resource-group $RG_NAME --name $VM_NAME --output table | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | head -1)
+
+# Now you can open Microsoft Remote Desktop and use the IP in new PC to connect to it
+
+# RDP into the VM
+ssh azureuser@$IP
+
+# Forwarding port to local 
+ssh -L 13389:localhost:3389 azureuser@$IP
+
+# Changing password
+az vm user update \
+  --resource-group $RG_NAME \
+  --name $VM_NAME \
+  --username azureuser \
+  --password <new-password>
+```
+
+Now you can either dev screenpipe on Linux or run screenpipe in the cloud that record your local MacOS. Make sure to configure Microsoft Remote Desktop to forward audio
 
 
 ## Join the Community

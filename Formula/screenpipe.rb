@@ -1,21 +1,20 @@
 class Screenpipe < Formula
   desc "Library to build personalized AI powered by what you've seen, said, or heard."
-  homepage "https://github.com/louis030195/screen-pipe"
-  url "https://github.com/louis030195/screen-pipe/releases/download/v0.1.63/screenpipe-0.1.63-aarch64-apple-darwin.tar.gz"
-  version "0.1.63"
+  homepage "https://github.com/mediar-ai/screenpipe"
+  url "https://github.com/mediar-ai/screenpipe/releases/download/v0.1.90/screenpipe-0.1.90-aarch64-apple-darwin.tar.gz"
+  version "0.1.90"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/louis030195/screen-pipe/releases/download/v#{version}/screenpipe-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "86f285b1e3cd5e23bce294bd005aa0d4988a08ef92d30acb0407b415af9dd705" # arm64
+      url "https://github.com/mediar-ai/screenpipe/releases/download/v#{version}/screenpipe-#{version}-aarch64-apple-darwin.tar.gz"
+      sha256 "3b4a1012341b60806eb403d8c5c36365540dc80b53ef595226f2d73689debf88" # arm64
     else
-      url "https://github.com/louis030195/screen-pipe/releases/download/v#{version}/screenpipe-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "4bb2c4a1d71654e8e10d48b0a9e60ecf01b1c27fa042988ff18b027a6bfea22c" # x86_64
+      url "https://github.com/mediar-ai/screenpipe/releases/download/v#{version}/screenpipe-#{version}-x86_64-apple-darwin.tar.gz"
+      sha256 "23add0dbfd536f0904ed6973d03b585a8bc1cf540fe78c1055900587c5c7e213" # x86_64
     end
   end
   
   depends_on "ffmpeg"
-  depends_on "tesseract"
 
   def install
     bin.install Dir["bin/*"]
@@ -38,7 +37,7 @@ end
 
 # aarch64-apple-darwin
 =begin
-cargo build --release --features metal --target aarch64-apple-darwin
+cargo build --release --features metal,pipes --target aarch64-apple-darwin
 tar -czf screenpipe-${VERSION}-aarch64-apple-darwin.tar.gz -C target/release screenpipe
 shasum -a 256 screenpipe-${VERSION}-aarch64-apple-darwin.tar.gz
 gh release upload v${VERSION} screenpipe-${VERSION}-aarch64-apple-darwin.tar.gz
@@ -49,7 +48,7 @@ rm screenpipe-${VERSION}-aarch64-apple-darwin.tar.gz
 =begin
 export PKG_CONFIG_PATH="/usr/local/opt/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH"
 export PKG_CONFIG_ALLOW_CROSS=1
-cargo build --release --features metal --target x86_64-apple-darwin
+cargo build --release --features metal,pipes --target x86_64-apple-darwin
 tar -czf screenpipe-${VERSION}-x86_64-apple-darwin.tar.gz -C target/release screenpipe
 shasum -a 256 screenpipe-${VERSION}-x86_64-apple-darwin.tar.gz
 gh release upload v${VERSION} screenpipe-${VERSION}-x86_64-apple-darwin.tar.gz
@@ -63,7 +62,7 @@ git commit -m "chore: update brew to version ${VERSION}"
 git push
 =end
 
-# brew tap louis030195/screen-pipe https://github.com/louis030195/screen-pipe.git
+# brew tap mediar-ai/screenpipe https://github.com/mediar-ai/screenpipe.git
 # brew install screenpipe
 
 # todo automate this in the future, not urgent for now ..

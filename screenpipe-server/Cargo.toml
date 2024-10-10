@@ -20,22 +20,16 @@ screenpipe-core = { path = "../screenpipe-core", features = ["security"] }
 # Image processing
 image = { workspace = true }
 
-# OCR
-# rusty-tesseract = "1.1.10"
-rusty-tesseract = { git = "https://github.com/louis030195/rusty-tesseract.git", branch = "main" }
-
-# threadpool
-threadpool = "1.8.1"
-num_cpus = "1.0"
-
 # Dates
 chrono = { version = "0.4.31", features = ["serde"] }
 
 # Database
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls", "chrono", "migrate"] }
-
-# FFmpeg bindings
-ffmpeg-next = "7.0.2"
+sqlx = { version = "0.7", features = [
+    "sqlite",
+    "runtime-tokio-native-tls",
+    "chrono",
+    "migrate",
+] }
 
 # Local Embeddings + STT
 candle = { workspace = true }
@@ -43,27 +37,20 @@ candle-nn = { workspace = true }
 candle-transformers = { workspace = true }
 tokenizers = { workspace = true }
 
-lazy_static = "1.4.0"
-base64 = "0.21.7"
 anyhow = "1.0.86"
-byteorder = "1.5.0"
 hf-hub = "0.3.2"
-symphonia = "0.5.4"
 rand = "0.8.5"
-rubato = "0.15.0"
 
 # Server
 axum = "0.7.5"
 tokio = { version = "1.15", features = ["full", "tracing"] }
-hyper = "1.4"
 tower-http = { version = "0.5.2", features = ["cors", "trace"] }
-tracing-subscriber = "0.3.18"
-console-subscriber = "0.3.0"
 
 # Log
 log = { workspace = true }
 env_logger = "0.10"
-
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # Cli ! shouldn't be required if using as lib
 clap = { version = "4.3", features = ["derive"] }
 
@@ -73,11 +60,8 @@ sysinfo = "0.29.0"
 # Color 
 colored = "2.0"
 
-# Tracing
-tracing = { workspace = true }
-
 # Plugins
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 futures = "0.3.17"
 
 # Directory management
@@ -97,37 +81,46 @@ async-trait = "0.1.68"
 ndarray = "0.15.6"
 rust-stemmers = "1.2.0"
 
+# base64
+base64 = "0.22.1"
+
+uuid = "1.5.0"
+
+tempfile = { version = "3.3.0", optional = true }
+url = { version = "2.2.0", optional = true }
+
+# Telemetry
+highlightio = { version = "1.0.2", features = ["tokio"] }
+
 [dev-dependencies]
 tempfile = "3.3.0"
-
 
 # Benches
 criterion = { workspace = true }
 rand = "0.8"
 
+axum-test = "15.3.0"
 
 [[bench]]
 name = "db_benchmarks"
 harness = false
 
-[features]
-default = []
-static-ffmpeg = ["ffmpeg-next/static"]
+[[bench]]
+name = "new_db_benchmark"
+harness = false
 
+[features]
+default = ["pipes"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+pipes = ["screenpipe-core/pipes", "tempfile", "url"]
+llm = ["screenpipe-core/llm"]
 
-pipes = ["screenpipe-core/pipes"]
 
 [[bin]]
 name = "screenpipe"
 path = "src/bin/screenpipe-server.rs"
 
-[[bin]]
-name = "screenpipe-video"
-path = "src/bin/screenpipe-video.rs"
 
-[[bin]]
-name = "screenpipe-pipe-runner"
-path = "src/bin/screenpipe-pipe-runner.rs"
-required-features = ["pipes"]
+[package.metadata.cargo-machete]
+ignored = ["tempfile", "url"]

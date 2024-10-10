@@ -7,8 +7,10 @@ use screenpipe_audio::default_output_device;
 use screenpipe_audio::list_audio_devices;
 use screenpipe_audio::parse_audio_device;
 use screenpipe_audio::record_and_transcribe;
+use screenpipe_audio::vad_engine::VadSensitivity;
 use screenpipe_audio::AudioDevice;
 use screenpipe_audio::AudioTranscriptionEngine;
+use screenpipe_audio::VadEngineEnum;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -26,6 +28,9 @@ struct Args {
 
     #[clap(long, help = "List available audio devices")]
     list_audio_devices: bool,
+
+    #[clap(long, help = "Deepgram API key")]
+    deepgram_api_key: Option<String>,
 }
 
 fn print_devices(devices: &[AudioDevice]) {
@@ -38,7 +43,7 @@ fn print_devices(devices: &[AudioDevice]) {
     println!("On macOS, it's not intuitive but output devices are your displays");
 }
 
-// TODO - kinda bad cli here
+// ! usage - cargo run --bin screenpipe-audio -- --audio-device "Display 1 (output)"
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,7 +51,7 @@ async fn main() -> Result<()> {
     use log::LevelFilter;
 
     Builder::new()
-        .filter(None, LevelFilter::Info)
+        .filter(None, LevelFilter::Debug)
         .filter_module("tokenizers", LevelFilter::Error)
         .init();
 
@@ -59,8 +64,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let deepgram_api_key = args.deepgram_api_key;
+
     let devices = if args.audio_device.is_empty() {
-        vec![default_input_device()?, default_output_device().await?]
+        vec![default_input_device()?, default_output_device()?]
     } else {
         args.audio_device
             .iter()
@@ -76,18 +83,23 @@ async fn main() -> Result<()> {
     std::fs::remove_file("output_0.mp4").unwrap_or_default();
     std::fs::remove_file("output_1.mp4").unwrap_or_default();
 
-    let chunk_duration = Duration::from_secs(5);
+    let chunk_duration = Duration::from_secs(10);
     let output_path = PathBuf::from("output.mp4");
-    let (whisper_sender, mut whisper_receiver) =
-        create_whisper_channel(Arc::new(AudioTranscriptionEngine::WhisperTiny)).await?;
+    let (whisper_sender, whisper_receiver, _) = create_whisper_channel(
+        Arc::new(AudioTranscriptionEngine::WhisperDistilLargeV3),
+        VadEngineEnum::WebRtc, // Or VadEngineEnum::WebRtc, hardcoded for now
+        deepgram_api_key,
+        &output_path,
+        VadSensitivity::Medium,
+    )
+    .await?;
     // Spawn threads for each device
     let recording_threads: Vec<_> = devices
         .into_iter()
         .enumerate()
-        .map(|(i, device)| {
+        .map(|(_, device)| {
             let device = Arc::new(device);
             let whisper_sender = whisper_sender.clone();
-            let output_path = output_path.with_file_name(format!("output_{}.mp4", i));
             let device_control = Arc::new(AtomicBool::new(true));
             let device_clone = Arc::clone(&device);
 
@@ -98,7 +110,6 @@ async fn main() -> Result<()> {
                 record_and_transcribe(
                     device_clone_2,
                     chunk_duration,
-                    output_path,
                     whisper_sender,
                     device_control_clone,
                 )
